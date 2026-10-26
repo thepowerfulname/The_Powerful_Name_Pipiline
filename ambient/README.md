@@ -26,6 +26,18 @@ python ambient/ambient_bed.py --ref "Psalm 145:4-5" --text-file build/verse.txt 
 3. The verse reference and format seed the variations inside that palette (key, progression order, voicings, bell placement, layer balance, room size). A Short and a long video on the same verse sound different. The same verse re-rendered for a fix sounds the same.
 4. The bed sits under the VO and ducks whenever the voice speaks.
 
+## Uniqueness ledger
+
+`ambient/ledger.json` records every bed that ships. With `--ledger`, a new Short gets a bed that:
+
+- uses a different key from the two Shorts right before it,
+- doesn't repeat the key + chord progression + layer mix of any of the last 30 Shorts,
+- has an audio fingerprint that matches no earlier bed (the build stops if it ever does).
+
+Re-rendering the same Short for a fix returns the identical bed. `--fresh` forces a new one when a verse comes back.
+
+`nightly.py` at the repo root runs this for the next publish date in `queue/queue.json` and commits the preview to `renders/<verse>/`.
+
 ## Overrides
 
 - `--mood lament` forces a tone if the tagger guesses wrong.

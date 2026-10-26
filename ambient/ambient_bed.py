@@ -115,12 +115,10 @@ def fft_filter(x, sr, gain_fn):
 
 
 # ---------------------------------------------------------------- layers
-def sections(c, chords, root, scale, rng):
+def sections(c, chords, root, scale, inversions):
     L = c.dur / len(chords)
     X = min(3.5, 0.4 * L)
-    voiced = []
-    for ch in chords:
-        voiced.append(chord_midis(root, scale, ch, inversion=int(rng.integers(0, 2))))
+    voiced = [chord_midis(root, scale, ch, inversion=inv) for ch, inv in zip(chords, inversions)]
     return L, X, voiced
 
 
@@ -314,18 +312,16 @@ def master(x, c, long_arc):
 
 
 # ---------------------------------------------------------------- build
-def build(ref, text, fmt, duration, variant, mood_override, sr):
-    mood, scores = tag_mood(text) if text else ("awe", {})
-    if mood_override:
-        mood = mood_override
+NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+
+
+def plan(ref, fmt, variant, mood, dur):
+    """Every musical choice for this bed, decided from the seed before any audio is made."""
     P = dict(PALETTES[mood])
     seed_src = f"{ref}|{fmt}|{variant}|{mood}"
     seed = int(hashlib.sha256(seed_src.encode()).hexdigest()[:16], 16)
     rng = np.random.default_rng(seed)
-
     loop = fmt == "short"
-    dur = SHORT_SECONDS if loop else float(duration)
-    c = Ctx(dur, sr, rng, loop)
 
     # per-render variation inside the palette
     P["bright"] = float(np.clip(P["bright"] + rng.uniform(-0.08, 0.08), 0.05, 0.95))
@@ -342,14 +338,34 @@ def build(ref, text, fmt, duration, variant, mood_override, sr):
     chords = chords[:n_sec]
     if not loop:
         chords[-1] = list(prog[0])      # land home at the end
-    sec = sections(c, chords, root, scale, rng)
+    inversions = [int(rng.integers(0, 2)) for _ in chords]
 
-    layers = {k: v * rng.uniform(0.82, 1.18) for k, v in P["layers"].items()}
+    layers ={k: v * rng.uniform(0.82, 1.18) for k, v in P["layers"].items()}
     for k, v in P.get("optional", {}).items():
         if rng.random() < 0.5:
             layers[k] = v * rng.uniform(0.8, 1.2)
     density = P["bell_density"] * rng.uniform(0.7, 1.3)
     rt = P["rt"] * rng.uniform(0.85, 1.15)
+    key = f"{NOTE_NAMES[root % 12]} {P['scale']}"
+    signature = key + " | " + " ".join("-".join(map(str, ch)) for ch in chords[:5]) + " | " + ",".join(sorted(layers))
+    return dict(P=P, rng=rng, seed_src=seed_src, loop=loop, root=root, scale=scale, chords=chords,
+                inversions=inversions,
+                n_sec=n_sec, layers=layers, density=density, rt=rt, key=key, signature=signature)
+
+
+def detect_mood(text, mood_override):
+    mood, scores = tag_mood(text) if text else ("awe", {})
+    return (mood_override or mood), scores
+
+
+def build(ref, text, fmt, duration, variant, mood_override, sr):
+    mood, scores = detect_mood(text, mood_override)
+    dur = SHORT_SECONDS if fmt == "short" else float(duration)
+    pl = plan(ref, fmt, variant, mood, dur)
+    P, rng, loop, root = pl["P"], pl["rng"], pl["loop"], pl["root"]
+    layers, density, rt, n_sec = pl["layers"], pl["density"], pl["rt"], pl["n_sec"]
+    c = Ctx(dur, sr, rng, loop)
+    sec = sections(c, pl["chords"], root, pl["scale"], pl["inversions"])
 
     mix = np.zeros((2, c.n))
     for name, amp in layers.items():
@@ -371,15 +387,53 @@ def build(ref, text, fmt, duration, variant, mood_override, sr):
     mix = reverb(mix, c, rt, P["wet"], rng)
     mix = master(mix, c, long_arc=not loop)
 
-    names = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
     meta = {
         "ref": ref, "format": fmt, "variant": variant, "mood": mood,
         "mood_scores": {k: v for k, v in scores.items() if v},
-        "key": f"{names[root % 12]} {P['scale']}", "seconds": round(c.dur, 3),
+        "key": pl["key"], "seconds": round(c.dur, 3),
         "sections": n_sec, "layers": sorted(layers), "reverb_s": round(rt, 2),
-        "seamless_loop": loop, "seed": seed_src,
+        "seamless_loop": loop, "seed": pl["seed_src"], "signature": pl["signature"],
+        "audio_fingerprint": hashlib.sha256(np.round(mix * 32767).astype(np.int16).tobytes()).hexdigest()[:16],
     }
     return mix, meta
+
+
+# ---------------------------------------------------------------- uniqueness ledger
+RECENT_SIGNATURES = 30   # a new bed may not repeat any of the last 30 key + progression + layer combos
+RECENT_KEYS = 2          # and may not share a key with the two Shorts right before it
+
+
+def choose_variant(ledger, ref, fmt, mood, dur, fresh=False):
+    """Same Short re-rendered -> same bed. New Short -> a bed unlike the recent ones."""
+    entries = ledger.setdefault("entries", [])
+    mine = [e for e in entries if e["ref"] == ref and e["format"] == fmt]
+    if mine and not fresh:
+        return mine[-1]["variant"], False
+    start = (max(e["variant"] for e in mine) + 1) if mine else 0
+    same_fmt = [e for e in entries if e["format"] == fmt]
+    recent_sigs = {e["signature"] for e in same_fmt[-RECENT_SIGNATURES:]}
+    recent_keys = {e["key"] for e in same_fmt[-RECENT_KEYS:]}
+    used_sigs = {e["signature"] for e in same_fmt}
+    fallback = None
+    for v in range(start, start + 200):
+        pl = plan(ref, fmt, v, mood, dur)
+        if pl["signature"] in recent_sigs or pl["key"] in recent_keys:
+            continue
+        if pl["signature"] not in used_sigs:
+            return v, True
+        fallback = v if fallback is None else fallback
+    return (fallback if fallback is not None else start), True
+
+
+def load_ledger(path):
+    p = Path(path)
+    return json.loads(p.read_text()) if p.exists() else {"entries": []}
+
+
+def record(ledger, path, meta):
+    ledger["entries"].append({k: meta[k] for k in ("ref", "format", "variant", "mood", "key",
+                                                  "signature", "audio_fingerprint")})
+    Path(path).write_text(json.dumps(ledger, indent=1))
 
 
 def write_wav(path, x, sr):
@@ -419,6 +473,8 @@ def main():
     ap.add_argument("--sr", type=int, default=48000)
     ap.add_argument("--out", required=True, help="Output WAV")
     ap.add_argument("--preview", action="store_true", help="Also write a phone-friendly .m4a")
+    ap.add_argument("--ledger", help="Uniqueness ledger (JSON). Picks a variant unlike recent Shorts")
+    ap.add_argument("--fresh", action="store_true", help="With --ledger: force a new bed for a verse used before")
     ap.add_argument("--vo", help="Voiceover to mix the bed under")
     ap.add_argument("--mix-out", help="Where to write the VO + bed mix")
     a = ap.parse_args()
@@ -430,7 +486,19 @@ def main():
             ap.error("long format needs --duration or --match")
         duration = ffprobe_seconds(a.match)
 
-    x, meta = build(a.ref, text, a.format, duration, a.variant, a.mood, a.sr)
+    variant, is_new = a.variant, False
+    if a.ledger:
+        ledger = load_ledger(a.ledger)
+        mood, _ = detect_mood(text, a.mood)
+        dur = SHORT_SECONDS if a.format == "short" else duration
+        variant, is_new = choose_variant(ledger, a.ref, a.format, mood, dur, a.fresh)
+
+    x, meta = build(a.ref, text, a.format, duration, variant, a.mood, a.sr)
+    if a.ledger and is_new:
+        clash = [e for e in ledger["entries"] if e["audio_fingerprint"] == meta["audio_fingerprint"]]
+        if clash:
+            sys.exit(f"audio identical to an earlier bed ({clash[0]['ref']}); refusing to reuse it")
+        record(ledger, a.ledger, meta)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     write_wav(out, x, a.sr)

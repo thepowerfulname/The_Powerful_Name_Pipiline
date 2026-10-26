@@ -1,0 +1,26 @@
+{
+  "ref": "Psalm 76:4,7",
+  "format": "short",
+  "variant": 0,
+  "mood": "awe",
+  "mood_scores": {
+    "awe": 2.0,
+    "hope": 1.0
+  },
+  "key": "F lydian",
+  "seconds": 54.0,
+  "sections": 5,
+  "layers": [
+    "bells",
+    "drone",
+    "pad",
+    "shimmer",
+    "strings",
+    "wind"
+  ],
+  "reverb_s": 6.02,
+  "seamless_loop": true,
+  "seed": "Psalm 76:4,7|short|0|awe",
+  "signature": "F lydian | 0-2-4 1-3-5 0-2-4 5-7-9 0-2-4-8 | bells,drone,pad,shimmer,strings,wind",
+  "audio_fingerprint": "550555116a03de3b"
+}

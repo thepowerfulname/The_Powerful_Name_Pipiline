@@ -449,13 +449,35 @@ def ffprobe_seconds(path):
     return float(out.stdout.strip())
 
 
+LOOP_SHIELD = 0.008   # seconds faded to silence at both ends of the final mix.
+# Loop-point pop (found Oct 27, 2026 on Psalm 76:4,7): the limiter delayed the whole mix by
+# ~5 ms, leaving a dropout at the top of the file while the end played at full level, so the
+# player wrapped from full sound into a gap. latency=1 removes the delay; the short fades make
+# the wrap meet silence even with the ~13 ms of padding the AAC encoder adds at the end.
+
+
+def loop_seam_qa(path, max_step=0.02):
+    """Fail if the encoded file clicks when the player wraps from the end back to the start."""
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-f", "f32le", "-ac", "2",
+                          "-ar", "48000", "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, np.float32).reshape(-1, 2)
+    lvl = np.abs(x).max(axis=1)
+    head, tail = lvl[:96].max(), lvl[-96:].max()                  # first/last 2 ms
+    lead_gap = int(np.argmax(lvl > 0.005)) if lvl.max() > 0.005 else 0   # silence before sound starts
+    ok = max(head, tail) <= max_step and lead_gap <= 96           # quiet edges, no dropout at the top
+    return {"loop_seam_ok": bool(ok), "loop_head_level": round(float(head), 4),
+            "loop_tail_level": round(float(tail), 4), "loop_lead_gap_ms": round(lead_gap / 48, 2)}
+
+
 def mix_under_vo(vo, bed, out, bed_db=-4.0):
     """Lay the bed under the voiceover and duck it whenever Tommy's VO speaks."""
     total = max(ffprobe_seconds(bed), ffprobe_seconds(vo))      # bed runs the full Short
     fc = (f"[1:a]aformat=channel_layouts=stereo,volume={bed_db}dB[bed];"
           f"[0:a]aformat=sample_rates=48000:channel_layouts=stereo,apad=whole_dur={total:.3f},asplit=2[vo][sc];"
           "[bed][sc]sidechaincompress=threshold=0.025:ratio=6:attack=60:release=650[duck];"
-          "[vo][duck]amix=inputs=2:normalize=0:duration=longest,alimiter=limit=0.95[m]")
+          "[vo][duck]amix=inputs=2:normalize=0:duration=longest,alimiter=limit=0.95:latency=1,"
+          f"atrim=end={total:.3f},afade=t=in:d={LOOP_SHIELD},"
+          f"afade=t=out:st={total - LOOP_SHIELD:.3f}:d={LOOP_SHIELD}[m]")
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(vo), "-i", str(bed),
                     "-filter_complex", fc, "-map", "[m]", "-ar", "48000", str(out)], check=True)
 
@@ -507,7 +529,13 @@ def main():
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(out), "-c:a", "aac", "-b:a", "192k",
                         str(out.with_suffix(".m4a"))], check=True)
     if a.vo:
-        mix_under_vo(a.vo, out, a.mix_out or out.with_name(out.stem + "_vo_mix.wav"))
+        mix_path = a.mix_out or out.with_name(out.stem + "_vo_mix.wav")
+        mix_under_vo(a.vo, out, mix_path)
+        if a.format == "short":
+            meta.update(loop_seam_qa(mix_path))
+            if not meta["loop_seam_ok"]:
+                print(json.dumps(meta))
+                sys.exit("loop seam QA failed: the Short would pop where it loops")
     print(json.dumps(meta))
 
 

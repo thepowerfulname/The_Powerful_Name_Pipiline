@@ -1,0 +1,25 @@
+{
+  "ref": "Revelation 5:11-12",
+  "format": "short",
+  "variant": 0,
+  "mood": "praise",
+  "mood_scores": {
+    "praise": 1.0
+  },
+  "key": "E major",
+  "seconds": 54.0,
+  "sections": 5,
+  "layers": [
+    "bells",
+    "drone",
+    "pad",
+    "shimmer",
+    "strings",
+    "wind"
+  ],
+  "reverb_s": 3.96,
+  "seamless_loop": true,
+  "seed": "Revelation 5:11-12|short|0|praise",
+  "signature": "E major | 0-2-4 2-4-6 3-5-7 4-6-8 0-2-4-8 | bells,drone,pad,shimmer,strings,wind",
+  "audio_fingerprint": "b95549188dc7038b"
+}
